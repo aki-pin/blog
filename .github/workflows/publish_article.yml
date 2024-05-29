@@ -36,7 +36,7 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git config --global user.name "github-actions[bot]"
           git commit -am "[bot] 公開の準備を完了しました。"
-          git push origin HEAD:${{ github.head_ref }}
+          git push origin HEAD:main
 
       - name: Set up Go
         uses: actions/setup-go@v5
