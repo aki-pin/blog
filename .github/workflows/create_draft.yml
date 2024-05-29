@@ -1,0 +1,249 @@
+name: Create Draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      path:
+        description: '記事のパス'
+        required: true
+      title:
+        description: '記事のタイトル'
+        required: true
+      author:
+        description: '記事の著者'
+        required: true
+      template:
+        type: choice
+        description: '記事のテンプレート'
+        required: true
+        default: default
+        options:
+          - default
+          - rubykaigi-2024
+
+jobs:
+  # PRが存在するかチェック
+  check-pr:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install GitHub CLI
+        run: |
+          sudo apt update
+          sudo apt install gh -y
+
+      - name: Check for PR to main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        id: check_pr
+        run: |
+          PR_COUNT=$(gh pr list --state open --base main --head ${{ github.event.inputs.path }} | wc -l)
+          if [ "$PR_COUNT" -gt "0" ]; then
+            echo "PR exists from branch: ${{ github.event.inputs.path }} to main"
+            echo "pr_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "No PR exists from branch: ${{ github.event.inputs.path }} to main"
+            echo "pr_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Fail the job if PR exists
+        if: steps.check_pr.outputs.pr_exists == 'true'
+        run: |
+          echo "Failing the job because a PR exists from ${{ github.event.inputs.path }} to main."
+          exit 1
+  # OGP画像が存在するかチェック
+  check-ogp:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Cloudinary CLI
+        run: pip3 install cloudinary-cli
+
+      - name: Export Cloudinary URL
+        run: echo "CLOUDINARY_URL=cloudinary://${{ secrets.CLD_API_KEY }}:${{secrets.CLD_API_SECRET }}@${{ vars.CLD_NAME }}" >> $GITHUB_ENV
+
+      - name: Count "ogp"
+        env:
+          CLOUDINARY_URL: ${{ env.CLOUDINARY_URL }}
+        id: check_image
+        run: |
+          EXISTS=$(cloudinary search "resource_type:image AND public_id=${{ github.event.inputs.path }}/ogp" | jq '.total_count')
+          echo "Total count: $EXISTS"
+          if [ "$EXISTS" -gt 0 ]; then
+            echo "Specific image exists: ${{ github.event.inputs.path }}/ogp"
+            echo "image_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Specific image does not exist: ${{ github.event.inputs.path }}/ogp"
+            echo "image_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Fail the job if the specific image exists
+        if: steps.check_image.outputs.image_exists == 'true'
+        run: |
+          echo "Failing the job because the specific image exists: ${{ github.event.inputs.path }}/ogp"
+          exit 1
+  # 既に記事が存在するかチェック
+  check-article:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.22
+          cache: false
+
+      - name: Setup blogsync
+        run: |
+          go install github.com/x-motemen/blogsync@v0.20.1
+
+      - name: Create blogsync.yaml
+        run: |
+          echo "${{ vars.BLOG_DOMAIN }}:" > blogsync.yaml
+          echo "  username: ${{ vars.BLOG_USERNAME }}" >> blogsync.yaml
+          echo "  password: ${{ secrets.HATEBU_API_KEY }}" >> blogsync.yaml
+          echo "default:" >> blogsync.yaml
+          echo "  local_root: ${{ vars.LOCAL_ROOT }}" >> blogsync.yaml
+
+      - name: Pull hatena blog
+        run: |
+          ~/go/bin/blogsync pull ${{ vars.BLOG_DOMAIN }}
+
+      - name: Count entry file
+        run: |
+          CNT=$(ls ${{ vars.LOCAL_ROOT }}/${{ vars.BLOG_DOMAIN }}/entry | grep ${{github.event.inputs.path}} | wc -l)
+          if [ "$CNT" -eq 0 ]; then
+            echo "Entry file does not exist"
+          else
+            echo "Entry file already exists"
+            exit 1
+          fi
+
+  post-draft:
+    needs: [check-pr, check-ogp, check-article]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: copy template
+        run: |
+            cp ".github/templates/draft-${{ github.event.inputs.template }}.md" tmp_draft.md
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.0'
+
+      - name: Install dependencies
+        run: |
+          gem install bundler
+          bundle install
+
+      - name: Upload OGP
+        run: |
+          CLOUD_NAME=${{ vars.CLD_NAME }} API_KEY=${{ secrets.CLD_API_KEY }} API_SECRET=${{ secrets.CLD_API_SECRET }} ruby scripts/upload_ogp.rb title="${{ github.event.inputs.title }}" path=${{ github.event.inputs.path }}  author="${{ github.event.inputs.author }}"
+
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.22
+          cache: false
+
+      - name: Setup blogsync
+        run: |
+          go install github.com/x-motemen/blogsync@v0.20.1
+
+      - name: Create blogsync.yaml
+        run: |
+          echo "${{ vars.BLOG_DOMAIN }}:" > blogsync.yaml
+          echo "  username: ${{ vars.BLOG_USERNAME }}" >> blogsync.yaml
+          echo "  password: ${{ secrets.HATEBU_API_KEY }}" >> blogsync.yaml
+          echo "default:" >> blogsync.yaml
+          echo "  local_root: ${{ vars.LOCAL_ROOT }}" >> blogsync.yaml
+
+      - name: Post draft to hatena blog
+        run: |
+          ~/go/bin/blogsync post --draft --title="${{ github.event.inputs.title }}" --custom-path=${{ github.event.inputs.path }} ${{ vars.BLOG_DOMAIN }} < tmp_draft.md
+
+  create-draft-branch:
+    needs: post-draft
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Create Branch
+        run: |
+          git checkout -b ${{ github.event.inputs.path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.22
+          cache: false
+
+      - name: Setup blogsync
+        run: |
+          go install github.com/x-motemen/blogsync@v0.20.1
+
+      - name: Create blogsync.yaml
+        run: |
+          echo "${{ vars.BLOG_DOMAIN }}:" > blogsync.yaml
+          echo "  username: ${{ vars.BLOG_USERNAME }}" >> blogsync.yaml
+          echo "  password: ${{ secrets.HATEBU_API_KEY }}" >> blogsync.yaml
+          echo "default:" >> blogsync.yaml
+          echo "  local_root: ${{ vars.LOCAL_ROOT }}" >> blogsync.yaml
+
+      - name: Pull hatena blog
+        run: |
+          ~/go/bin/blogsync pull
+
+      - name: Copy Entry File and Create Directory Structure
+        run: |
+          mkdir -p ${{ vars.ROOT }}/${{ github.event.inputs.path }}/images
+          touch ${{ vars.ROOT }}/${{ github.event.inputs.path }}/entry.md
+          cp ${{ vars.LOCAL_ROOT }}/${{ vars.BLOG_DOMAIN }}/entry/${{ github.event.inputs.path }}.md ${{ vars.ROOT }}/${{ github.event.inputs.path }}/entry.md
+          touch ${{ vars.ROOT }}/${{ github.event.inputs.path }}/images/.gitkeep
+
+      - name: Commit and push
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git add ${{ vars.ROOT }}/${{ github.event.inputs.path }}
+          git commit -m "github-actions[bot] 初回下書き作成"
+          git push origin ${{ github.event.inputs.path }}
+
+  create-pr:
+    needs: create-draft-branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.path }}
+
+      - name: Create Pull Request
+        run: |
+          gh pr create --base main --head ${{ github.event.inputs.path }} --title "[新規] ${{ github.event.inputs.title }}" --body "`cat .github/templates/pull-request-body-new-entry.md`"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add preview URL to PR body
+        run: |
+          url=$(cat ${{ vars.ROOT }}/${{ github.event.inputs.path }}/entry.md | grep PreviewURL)
+          gh pr comment ${{ env.BLOG_PATH }} --body "$url"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

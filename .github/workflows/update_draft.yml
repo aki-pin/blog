@@ -1,0 +1,54 @@
+name: Update Draft
+
+on:
+  pull_request:
+    types: synchronize
+
+jobs:
+  update-draft:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.0'
+
+      - name: Install dependencies
+        run: |
+          gem install bundler
+          bundle install
+
+      - name: Update Draft Images
+        run: |
+          CLOUD_NAME=${{ vars.CLD_NAME }} API_KEY=${{ secrets.CLD_API_KEY }} API_SECRET=${{ secrets.CLD_API_SECRET }} ruby scripts/update_draft_images.rb path=./entries/${{ github.head_ref }}/entry.md
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.22
+          cache: false
+
+      - name: Setup blogsync
+        run: |
+          go install github.com/x-motemen/blogsync@v0.20.1
+
+      - name: Create blogsync.yaml
+        run: |
+          echo "${{ vars.BLOG_DOMAIN }}:" > blogsync.yaml
+          echo "  username: ${{ vars.BLOG_USERNAME }}" >> blogsync.yaml
+          echo "  password: ${{ secrets.HATEBU_API_KEY }}" >> blogsync.yaml
+          echo "default:" >> blogsync.yaml
+          echo "  local_root: ${{ vars.LOCAL_ROOT }}" >> blogsync.yaml
+
+      - name: Pull hatena blog
+        run: |
+          ~/go/bin/blogsync pull ${{ vars.BLOG_DOMAIN }}
+
+      - name: Update draft
+        run: |
+          cp -f ${{ vars.ROOT }}/${{ github.head_ref }}/entry.md ${{ vars.LOCAL_ROOT }}/${{ vars.BLOG_DOMAIN }}/entry/${{ github.head_ref }}.md
+          ~/go/bin/blogsync push ${{ vars.LOCAL_ROOT }}/${{ vars.BLOG_DOMAIN }}/entry/${{ github.head_ref }}.md

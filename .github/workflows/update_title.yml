@@ -1,0 +1,86 @@
+name: Update Title
+
+on:
+  workflow_dispatch:
+    inputs:
+      title:
+        description: '記事のタイトル'
+        required: true
+      author:
+        description: '記事の著者'
+        required: true
+
+jobs:
+  update-ogp:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.0'
+
+      - name: Install dependencies
+        run: |
+          gem install bundler
+          bundle install
+
+      - name: Update title
+        run: |
+          CLOUD_NAME=${{ vars.CLD_NAME }} API_KEY=${{ secrets.CLD_API_KEY }} API_SECRET=${{ secrets.CLD_API_SECRET }} ruby scripts/update_title.rb title="${{ github.event.inputs.title }}"  path=${{ github.ref_name }}  author="${{ github.event.inputs.author }}"
+
+      - name: Commit and push
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git add ${{ vars.ROOT }}/${{ github.ref_name }}
+          git commit -m "github-actions[bot] 記事タイトルを更新した"
+          git push origin ${{ github.event.inputs.path }}
+
+      - name: Update Draft Images
+        run: |
+          CLOUD_NAME=${{ vars.CLD_NAME }} API_KEY=${{ secrets.CLD_API_KEY }} API_SECRET=${{ secrets.CLD_API_SECRET }} ruby scripts/update_draft_images.rb path=./entries/${{ github.ref_name }}/entry.md
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.22
+          cache: false
+
+      - name: Setup blogsync
+        run: |
+          go install github.com/x-motemen/blogsync@v0.20.1
+
+      - name: Create blogsync.yaml
+        run: |
+          echo "${{ vars.BLOG_DOMAIN }}:" > blogsync.yaml
+          echo "  username: ${{ vars.BLOG_USERNAME }}" >> blogsync.yaml
+          echo "  password: ${{ secrets.HATEBU_API_KEY }}" >> blogsync.yaml
+          echo "default:" >> blogsync.yaml
+          echo "  local_root: ${{ vars.LOCAL_ROOT }}" >> blogsync.yaml
+
+      - name: Pull hatena blog
+        run: |
+          ~/go/bin/blogsync pull ${{ vars.BLOG_DOMAIN }}
+
+      - name: Update draft
+        run: |
+          cp -f "${{ vars.ROOT }}/${{ github.ref_name }}/entry.md" "${{ vars.LOCAL_ROOT }}/${{ vars.BLOG_DOMAIN }}/entry/${{ github.ref_name }}.md"
+
+          ~/go/bin/blogsync push "${{ vars.LOCAL_ROOT }}/${{ vars.BLOG_DOMAIN }}/entry/${{ github.ref_name }}.md"
+      - name: Change PR title
+        run: |
+          PR_NUMBER=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          "https://api.github.com/repos/${{ github.repository }}/pulls?state=open&head=${{ github.repository_owner }}:${{ github.ref_name }}" | jq -r '.[0].number')
+          if [ "$PR_NUMBER" != "null" ]; then
+            curl -s -X PATCH -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"title\":\"[新規]${{ github.event.inputs.title }}\"}" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER"
+            echo "PR title changed successfully"
+          else
+            echo "No open PR found for branch ${{ github.ref_name }}"
+          fi

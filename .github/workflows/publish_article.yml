@@ -1,0 +1,67 @@
+name: Publish Article
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  update-draft:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.0'
+
+      - name: Install dependencies
+        run: |
+          gem install bundler
+          bundle install
+
+      - name: Update Images
+        run: |
+          CLOUD_NAME=${{ vars.CLD_NAME }} API_KEY=${{ secrets.CLD_API_KEY }} API_SECRET=${{ secrets.CLD_API_SECRET }} ruby scripts/update_draft_images.rb path=./entries/${{ github.head_ref }}/entry.md
+
+
+      - name: Update Draft Status
+        run: |
+          sed -i 's/Draft: true/Draft: false/g' ./entries/${{ github.head_ref }}/entry.md
+
+      - name: Commit and push
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git commit -am "[bot] 公開の準備を完了しました。"
+          git push origin HEAD:${{ github.head_ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.22
+          cache: false
+
+      - name: Setup blogsync
+        run: |
+          go install github.com/x-motemen/blogsync@v0.20.1
+
+      - name: Create blogsync.yaml
+        run: |
+          echo "${{ vars.BLOG_DOMAIN }}:" > blogsync.yaml
+          echo "  username: ${{ vars.BLOG_USERNAME }}" >> blogsync.yaml
+          echo "  password: ${{ secrets.HATEBU_API_KEY }}" >> blogsync.yaml
+          echo "default:" >> blogsync.yaml
+          echo "  local_root: ${{ vars.LOCAL_ROOT }}" >> blogsync.yaml
+
+      - name: Pull hatena blog
+        run: |
+          ~/go/bin/blogsync pull ${{ vars.BLOG_DOMAIN }}
+
+      - name: Publish article
+        run: |
+          cp -f ${{ vars.ROOT }}/${{ github.head_ref }}/entry.md ${{ vars.LOCAL_ROOT }}/${{ vars.BLOG_DOMAIN }}/entry/${{ github.head_ref }}.md
+
+          ~/go/bin/blogsync push ${{ vars.LOCAL_ROOT }}/${{ vars.BLOG_DOMAIN }}/entry/${{ github.head_ref }}.md

@@ -1,0 +1,65 @@
+name: Lint Markdown Files
+
+on:
+  pull_request:
+    types:
+      - synchronize
+
+jobs:
+  textlint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Create .textlintrc
+        run: |
+          echo '{ "rules": { "preset-ja-technical-writing": true } }' > .textlintrc
+
+      - name: Install textlint
+        run: |
+          npm install textlint textlint-rule-preset-ja-technical-writing
+
+      - name: Lint files and save results
+        run: |
+          npx textlint '${{ vars.ROOT }}/${{ github.head_ref }}/entry.md' --format json > textlint-result.json || true
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.0'
+
+      - name: Comment PR with textlint results
+        run: ruby scripts/format_textlint_result.rb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract PR number
+        id: pr
+        run: echo "number=$(jq --raw-output .pull_request.number $GITHUB_EVENT_PATH)" >> $GITHUB_OUTPUT
+
+      - name: Delete previous lint comments
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=$(jq --raw-output .pull_request.number $GITHUB_EVENT_PATH)
+          echo "PR_NUMBER: $PR_NUMBER"
+          COMMENTS_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
+          COMMENTS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" $COMMENTS_URL)
+          echo "$COMMENTS" | jq -r '.[] | select(.user.login == "github-actions[bot]" and .body != null and (.body | test("^## textlintの結果:"))) | .id' | while read -r COMMENT_ID; do
+            DELETE_URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}"
+            curl -s -X DELETE -H "Authorization: token $GITHUB_TOKEN" "$DELETE_URL"
+          done
+
+
+      - name: Add new lint comment
+        run: |
+          COMMENT_BODY=$(<lint_comment.txt)
+          gh pr comment "${{ steps.pr.outputs.number }}" --body "$COMMENT_BODY"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
